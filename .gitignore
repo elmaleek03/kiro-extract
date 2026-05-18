@@ -1,0 +1,19 @@
+# Build artifacts
+/kiro-extract
+/kiro-extract.exe
+/dist/
+
+# Extracted credentials — never commit
+/kiro-out/
+*-credentials.json
+*-credentials.csv
+*refresh-tokens.txt
+*token-refresh.txt
+all-credentials.json
+auth.json
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
