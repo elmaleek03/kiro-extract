@@ -1,12 +1,14 @@
 # kiro-extract
 
-Extract Kiro provider credentials managed by an enowxai proxy daemon.
+Interactive CLI to move Kiro credentials between an **enowxai** proxy daemon
+and a **9router** dashboard.
 
-The enowxai daemon caches a proxy JWT in `auth.json`. That JWT calls
-`https://api.enowxlabs.com/proxy/accounts/credentials` and returns every
-account the license is paying for, including raw access/refresh tokens.
-This tool reads that JWT (from a docker container, a host file, or the
-flag) and writes the Kiro accounts to disk in several convenient shapes.
+Two flows in one binary:
+
+1. **Extract** Kiro provider credentials from enowxai (reads the proxy JWT
+   from `auth.json` and calls `https://api.enowxlabs.com/proxy/accounts/credentials`).
+2. **Import** a list of refresh tokens into a 9router dashboard via
+   `POST /api/oauth/kiro/import`, with a configurable delay between calls.
 
 Pure stdlib Go. Works on Linux, macOS, and Windows.
 
@@ -18,37 +20,36 @@ Download a prebuilt binary from `dist/` for your OS/arch, or build from source:
 go build -o kiro-extract .
 ```
 
-## Usage
+## Run
 
 ```sh
-# from a running enowxai docker container (default)
-kiro-extract -mode docker -container enowxai -out ./kiro-out
-
-# from auth.json on the host machine
-kiro-extract -mode host -path ~/.enowxai/auth.json -out ./kiro-out
-kiro-extract -mode host                       # uses ~/.enowxai/auth.json (or %USERPROFILE%\.enowxai\auth.json on Windows)
-
-# bypass auth.json entirely if you already have the proxy JWT
-kiro-extract -token eyJhbGci... -out ./kiro-out
+./kiro-extract        # interactive menu
+go run .              # same, from source
 ```
 
-### Flags
+You will see:
 
-| flag | default | description |
-|---|---|---|
-| `-mode` | `docker` | `docker` or `host` |
-| `-container` | `enowxai` | docker container name (mode=docker) |
-| `-container-path` | `/root/.enowxai/auth.json` | path inside container |
-| `-path` | platform default | path to `auth.json` on host |
-| `-token` | _empty_ | proxy JWT, skips reading `auth.json` |
-| `-api` | `https://api.enowxlabs.com` | upstream API base |
-| `-out` | `kiro-out` | output directory |
-| `-timeout` | `30s` | HTTP timeout |
-| `-quiet` |  | suppress progress output |
+```
+=========================================
+ kiro-extract: enowxai <-> 9router tools
+=========================================
+ 1) Extract Kiro credentials from enowxai
+ 2) Import refresh tokens into 9router
+ q) Quit
+```
 
-## Output
+### 1. Extract
 
-Files written to `-out`, mode `0600`:
+Pick a source for the proxy JWT:
+
+- **docker container** — runs `docker exec <container> cat <path>` (defaults
+  to `enowxai:/root/.enowxai/auth.json`).
+- **host file path** — reads `auth.json` from the local filesystem
+  (default `~/.enowxai/auth.json`, or `%USERPROFILE%\.enowxai\auth.json`
+  on Windows).
+- **paste a proxy JWT directly** — skips reading any file.
+
+Output files (mode `0600`) under the chosen output directory:
 
 | file | contents |
 |---|---|
@@ -58,6 +59,26 @@ Files written to `-out`, mode `0600`:
 | `kiro-credentials.csv` | slim records as csv |
 | `kiro-token-refresh.txt` | `accessToken:refreshToken` per line |
 | `kiro-refresh-tokens.txt` | refresh token per line |
+
+### 2. Import
+
+Reads defaults from `.env` (copy `.env.example`). All values can be overridden
+interactively before each run.
+
+`.env` keys:
+
+| key | default | description |
+|---|---|---|
+| `BASE_URL` | `http://localhost:20128` | 9router dashboard URL |
+| `AUTH_TOKEN` | _empty_ | value of the `auth_token` cookie |
+| `TOKENS_FILE` | `kiro-out/kiro-refresh-tokens.txt` | one refresh token per line |
+| `DELAY_SECONDS` | `1` | sleep between requests |
+| `INSECURE` | `false` | skip TLS verification (self-signed dashboards) |
+
+Per-line output during import:
+
+- `OK (200) id=<uuid> email=<email|<no email>>` for `{"success":true,...}`
+- `FAIL (<status>) <error message>` for `{"error":"..."}`
 
 ## Build for all platforms
 

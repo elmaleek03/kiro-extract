@@ -3,6 +3,9 @@
 /kiro-extract.exe
 /dist/
 
+# Local config — may contain auth_token cookie
+/.env
+
 # Extracted credentials — never commit
 /kiro-out/
 *-credentials.json
