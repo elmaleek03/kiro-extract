@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -17,11 +16,11 @@ import (
 )
 
 const (
-	defaultAPIBase       = "https://api.enowxlabs.com"
-	defaultContainer     = "enowxai"
-	defaultContainerPath = "/root/.enowxai/auth.json"
-	defaultOutDir        = "kiro-out"
-	httpTimeout          = 30 * time.Second
+	defaultAPIBase          = "https://enowxai-dashboard.elmaleek.me"
+	defaultAccountsPath     = "/api/accounts"
+	defaultSessionCookieName = "enowxai_session"
+	defaultOutDir           = "kiro-out"
+	httpTimeout             = 30 * time.Second
 )
 
 type authFile struct {
@@ -89,35 +88,34 @@ type slimAccount struct {
 func runExtract(stdin *bufio.Reader) error {
 	fmt.Println()
 	fmt.Println("--- extract ---")
-	fmt.Println(" 1) read auth.json from a docker container (default)")
-	fmt.Println(" 2) read auth.json from a host file path")
-	fmt.Println(" 3) paste a proxy JWT directly")
+	fmt.Println(" 1) paste enowxai_session cookie value (default)")
+	fmt.Println(" 2) read session cookie from .env (ENOWXAI_SESSION)")
+	fmt.Println(" 3) read session cookie from a host auth.json file")
 	fmt.Println(" b) back")
 	src := strings.ToLower(prompt(stdin, "source> ", "1"))
 
-	var jwt string
+	var sessionCookie string
 	switch src {
 	case "1", "":
-		container := prompt(stdin, fmt.Sprintf("container [%s]> ", defaultContainer), defaultContainer)
-		path := prompt(stdin, fmt.Sprintf("path inside container [%s]> ", defaultContainerPath), defaultContainerPath)
-		t, err := tokenFromDocker(container, path)
-		if err != nil {
-			return err
+		sessionCookie = strings.TrimSpace(prompt(stdin, "enowxai_session cookie> ", ""))
+		if sessionCookie == "" {
+			return errors.New("empty session cookie")
 		}
-		jwt = t
 	case "2":
+		env, _ := loadEnv(".env")
+		sessionCookie = env["ENOWXAI_SESSION"]
+		if sessionCookie == "" {
+			return errors.New("ENOWXAI_SESSION not found in .env")
+		}
+		fmt.Printf("loaded session cookie from .env (len=%d)\n", len(sessionCookie))
+	case "3":
 		def := defaultHostAuthPath()
 		path := prompt(stdin, fmt.Sprintf("path to auth.json [%s]> ", def), def)
 		t, err := tokenFromHost(path)
 		if err != nil {
 			return err
 		}
-		jwt = t
-	case "3":
-		jwt = strings.TrimSpace(prompt(stdin, "paste proxy JWT> ", ""))
-		if jwt == "" {
-			return errors.New("empty token")
-		}
+		sessionCookie = t
 	case "b", "back":
 		return nil
 	default:
@@ -127,8 +125,8 @@ func runExtract(stdin *bufio.Reader) error {
 	apiBase := prompt(stdin, fmt.Sprintf("api base [%s]> ", defaultAPIBase), defaultAPIBase)
 	outDir := prompt(stdin, fmt.Sprintf("output directory [%s]> ", defaultOutDir), defaultOutDir)
 
-	fmt.Printf("\nfetching credentials from %s ...\n", apiBase)
-	raw, err := fetchCredentials(apiBase, jwt, httpTimeout)
+	fmt.Printf("\nfetching accounts from %s ...\n", apiBase)
+	raw, err := fetchAccounts(apiBase, sessionCookie, httpTimeout)
 	if err != nil {
 		return err
 	}
@@ -163,22 +161,6 @@ func runExtract(stdin *bufio.Reader) error {
 
 	fmt.Printf("done: %d kiro accounts -> %s\n", len(kiroSlim), outDir)
 	return nil
-}
-
-func tokenFromDocker(container, path string) (string, error) {
-	if _, err := exec.LookPath("docker"); err != nil {
-		return "", fmt.Errorf("docker CLI not found on PATH: %w", err)
-	}
-	cmd := exec.Command("docker", "exec", container, "sh", "-c", "cat "+shellQuote(path))
-	out, err := cmd.Output()
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			return "", fmt.Errorf("docker exec failed: %s: %s", err, strings.TrimSpace(string(ee.Stderr)))
-		}
-		return "", fmt.Errorf("docker exec failed: %w", err)
-	}
-	return parseAuthToken(out)
 }
 
 func tokenFromHost(path string) (string, error) {
@@ -217,18 +199,16 @@ func defaultHostAuthPath() string {
 	}
 }
 
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-func fetchCredentials(apiBase, jwt string, timeout time.Duration) ([]byte, error) {
-	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(apiBase, "/")+"/proxy/accounts/credentials", nil)
+func fetchAccounts(apiBase, sessionCookie string, timeout time.Duration) ([]byte, error) {
+	url := strings.TrimRight(apiBase, "/") + defaultAccountsPath
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+jwt)
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "kiro-extract/1.0")
+	req.Header.Set("Cookie", defaultSessionCookieName+"="+sessionCookie)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
+	req.Header.Set("Referer", strings.TrimRight(apiBase, "/")+"/accounts/standard")
 
 	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
@@ -247,12 +227,22 @@ func fetchCredentials(apiBase, jwt string, timeout time.Duration) ([]byte, error
 }
 
 func splitKiro(raw []byte) (full []json.RawMessage, slim []slimAccount, err error) {
+	// Try {data: [...]} wrapper first (enowxai proxy format).
 	var resp credsResp
-	if err = json.Unmarshal(raw, &resp); err != nil {
-		return nil, nil, fmt.Errorf("decode response: %w", err)
+	if err = json.Unmarshal(raw, &resp); err == nil && len(resp.Data) > 0 {
+		return splitKiroFromRaw(resp.Data)
 	}
+	// Try direct array (dashboard format).
+	var arr []json.RawMessage
+	if err = json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
+		return splitKiroFromRaw(arr)
+	}
+	return nil, nil, fmt.Errorf("decode response: unrecognized JSON structure (first 200 bytes: %s)", truncate(string(raw), 200))
+}
+
+func splitKiroFromRaw(items []json.RawMessage) (full []json.RawMessage, slim []slimAccount, err error) {
 	var skipped int
-	for _, item := range resp.Data {
+	for _, item := range items {
 		var a account
 		if err := json.Unmarshal(item, &a); err != nil {
 			skipped++
