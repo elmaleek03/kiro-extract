@@ -157,7 +157,32 @@ func runExtractLocal(stdin *bufio.Reader) error {
 		return err
 	}
 
+	// Open output files upfront so we can write incrementally.
+	rtFile, err := os.OpenFile(filepath.Join(outDir, "kiro-refresh-tokens.txt"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer rtFile.Close()
+
+	trFile, err := os.OpenFile(filepath.Join(outDir, "kiro-token-refresh.txt"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer trFile.Close()
+
+	csvFile, err := os.OpenFile(filepath.Join(outDir, "kiro-credentials.csv"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer csvFile.Close()
+	csvW := csv.NewWriter(csvFile)
+	csvW.Write([]string{
+		"email", "refresh_token", "access_token", "expires_at", "expires_in",
+		"profile_arn", "remaining_credits", "status", "plan_type",
+	})
+
 	var slim []slimAccount
+	var okCount int
 	for i, acct := range accounts {
 		if acct.Provider != "kiro" {
 			continue
@@ -171,31 +196,40 @@ func runExtractLocal(stdin *bufio.Reader) error {
 		}
 		fmt.Println("ok")
 
-		slim = append(slim, slimAccount{
+		a := slimAccount{
 			Email:            acct.Email,
 			ID:               acct.ID,
 			Status:           acct.Status,
 			RemainingCredits: acct.RemainingCredits,
 			RefreshToken:     rt,
 			PlanType:         acct.PlanType,
+		}
+		slim = append(slim, a)
+
+		// Write to txt files immediately.
+		fmt.Fprintf(rtFile, "%s\n", rt)
+		fmt.Fprintf(trFile, "%s:%s\n", "", rt)
+		csvW.Write([]string{
+			a.Email, a.RefreshToken, "", "", "",
+			"", fmt.Sprintf("%g", a.RemainingCredits), a.Status, a.PlanType,
 		})
+		csvW.Flush()
+		okCount++
 
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	files := map[string]func() error{
-		"kiro-credentials.json":   func() error { return writeJSON(filepath.Join(outDir, "kiro-credentials.json"), slim) },
-		"kiro-credentials.csv":    func() error { return writeCSV(filepath.Join(outDir, "kiro-credentials.csv"), slim) },
-		"kiro-token-refresh.txt":  func() error { return writeTokenRefresh(filepath.Join(outDir, "kiro-token-refresh.txt"), slim) },
-		"kiro-refresh-tokens.txt": func() error { return writeRefreshTokens(filepath.Join(outDir, "kiro-refresh-tokens.txt"), slim) },
-	}
-	for name, fn := range files {
-		if err := fn(); err != nil {
-			return fmt.Errorf("write %s: %w", name, err)
-		}
+	csvW.Flush()
+	rtFile.Close()
+	trFile.Close()
+	csvFile.Close()
+
+	// Write JSON files (need full slice).
+	if err := writeJSON(filepath.Join(outDir, "kiro-credentials.json"), slim); err != nil {
+		return fmt.Errorf("write kiro-credentials.json: %w", err)
 	}
 
-	fmt.Printf("\ndone: %d kiro accounts -> %s\n", len(slim), outDir)
+	fmt.Printf("\ndone: %d kiro accounts -> %s\n", okCount, outDir)
 	return nil
 }
 
